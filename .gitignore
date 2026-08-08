@@ -1,0 +1,7 @@
+/build/
+/dist/
+/.vs/
+/release/
+*.suo
+*.user
+Thumbs.db
