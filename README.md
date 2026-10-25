@@ -12,10 +12,12 @@ TopPin 使用原生 Win32 C 编写。它没有主窗口、安装程序、后台�
 
 ## 本分支的定制
 
-这是 [F3rcc/TopPin](https://github.com/F3rcc/TopPin)，在上游 `chiimyen/TopPin` 基础上加了两个功能：
+这是 [F3rcc/TopPin](https://github.com/F3rcc/TopPin)，在上游 `chiimyen/TopPin` 基础上加了这些功能：
 
 - **热键可配置**：不再写死 `Ctrl+Alt+T`，改 `TopPin.ini` 即可，托盘菜单可直接打开/重载配置。
-- **置顶高亮边框**：被钉住的窗口四周会有一圈可配颜色/宽度的边框，关掉后不会多出任何定时器。
+- **PowerToys 同款置顶边框**：几何、默认外观、圆角规则全部照搬 PowerToys `AlwaysOnTop` 模块（见下方“边框是怎么画的”）。
+- **窗口不透明度调节**：默认 `Ctrl+Win+=` 提高、`Ctrl+Win+-` 降低，每次 10%，范围 20%–100%，只对已置顶窗口生效，取消置顶时自动还原。
+- **游戏时不激活**：独占全屏（D3D fullscreen）运行中不响应置顶，默认开启。
 
 ## 下载与使用
 
@@ -34,7 +36,9 @@ TopPin 使用原生 Win32 C 编写。它没有主窗口、安装程序、后台�
 
 - 单个便携 EXE，不需要安装。
 - 全局快捷键默认 `Ctrl + Alt + T`，**可在 `TopPin.ini` 里改成任意组合**。
-- 置顶窗口周围显示可配置的高亮边框（颜色、宽度、开关）。
+- 置顶窗口周围显示一圈 PowerToys 风格的边框：默认跟随系统主题色、4px、随窗口圆角、DPI 自适应。
+- 可调已置顶窗口的不透明度（20%–100%，步长 10%），取消置顶自动还原。
+- 独占全屏游戏运行时不激活，默认开启。
 - 托盘菜单查看和取消已置顶窗口。
 - 可选开机自动启动，默认关闭。
 - 遇到管理员窗口时按需请求 Windows UAC 权限。
@@ -49,21 +53,48 @@ TopPin 使用原生 Win32 C 编写。它没有主窗口、安装程序、后台�
 ```ini
 [TopPin]
 Hotkey=Ctrl+Alt+T
+OpacityUpHotkey=Ctrl+Win+=
+OpacityDownHotkey=Ctrl+Win+-
 Border=1
-BorderColor=#FFB020
-BorderWidth=3
+BorderColor=auto
+BorderOpacity=100
+BorderThickness=4
+BorderCorner=1
+BlockInGameMode=1
 ```
 
-| 键 | 说明 |
-| --- | --- |
-| `Hotkey` | 修饰键 `Ctrl`/`Alt`/`Shift`/`Win` 至少一个，加一个主键。主键支持 `A-Z`、`0-9`、`F1-F24`、`Space`、`Tab`、`Enter`、`Esc`、`Insert`、`Delete`、`Home`、`End`、`PageUp`、`PageDown`、`Up`、`Down`、`Left`、`Right`、`Num0-Num9`、`PrintScreen`、`Pause`。大小写不敏感，空格会被忽略。 |
-| `Border` | `1` 显示置顶高亮边框，`0` 关闭。 |
-| `BorderColor` | `#RRGGBB` 十六进制颜色，默认 `#FFB020`。 |
-| `BorderWidth` | 边框宽度，1-16 像素。 |
+| 键 | 说明 | PowerToys 默认 |
+| --- | --- | --- |
+| `Hotkey` | 置顶/取消热键。修饰键 `Ctrl`/`Alt`/`Shift`/`Win` 至少一个，加一个主键 | `Win+Ctrl+T`（本分支沿用 `Ctrl+Alt+T`） |
+| `OpacityUpHotkey` | 提高不透明度 | `Ctrl+Win+=` |
+| `OpacityDownHotkey` | 降低不透明度 | `Ctrl+Win+-` |
+| `Border` | `1` 显示边框，`0` 关闭 | `1` |
+| `BorderColor` | `auto` 跟随系统主题色；也可写 `#RRGGBB` | 主题色（拿不到时 `#00ADEF`） |
+| `BorderOpacity` | 边框不透明度，1–100 | `100` |
+| `BorderThickness` | 边框粗细（像素，会乘 DPI 缩放），1–32 | `4` |
+| `BorderCorner` | `1` 跟随窗口圆角，`0` 直角 | `1` |
+| `BlockInGameMode` | `1` 独占全屏游戏时不激活 | `1` |
+
+热键主键支持 `A-Z`、`0-9`、`F1-F24`、`Space`、`Tab`、`Enter`、`Esc`、`Insert`、`Delete`、`Home`、`End`、`PageUp`、`PageDown`、`Up`、`Down`、`Left`、`Right`、`Num0-Num9`、`PrintScreen`、`Pause`，以及 `-` `=` `,` `.` `;` `/` `[` `\` `]` `'` 和反引号。大小写不敏感，空格会被忽略。
 
 改完在托盘菜单点 **重新加载配置** 即可生效，不用重启；写错了会自动退回默认值并在托盘气泡里提示。
 
 > 关掉 `Border` 后连边框定时器都不会启动，回归“零额外开销”的上游行为。
+
+## 边框是怎么画的
+
+全部照搬 PowerToys `src/modules/alwaysontop/AlwaysOnTop`：
+
+1. 取 `DWMWA_EXTENDED_FRAME_BOUNDS`（窗口可见边框），向外各扩 `BorderThickness`，这就是边框窗口的矩形——所以圆环画在**窗口外面**，只压住 1px，不遮内容。
+2. 描边中心线 = 客户区向内 `thickness / 2 + 1` 的圆角矩形，描边宽度 = `thickness`；圆角半径取窗口的 `DWMWA_WINDOW_CORNER_PREFERENCE`（ROUND=8 / ROUNDSMALL=4 / 其它=0）再乘 DPI 缩放。
+3. 逐像素用圆角矩形有符号距离场算覆盖率做抗锯齿，写进 32 位预乘 ARGB 位图，再用 `UpdateLayeredWindow` 贴上去——和 PowerToys 用 D2D 画出来的结果一致。
+4. 只遍历靠近四边的“边框带”，中间像素直接跳过，所以即使 4K 窗口渲染开销也可忽略。
+5. 边框窗口是 `WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW`，点击完全穿透、不进任务栏和 Alt-Tab。
+
+## 不透明度与游戏模式
+
+- 调节只作用在**已置顶**窗口上，内部用的是 `WS_EX_LAYERED` + `SetLayeredWindowAttributes`，并会缓存窗口原本的 layered/alpha/colorkey 状态，取消置顶或退出程序时原样还原。
+- 游戏判定与 PowerToys 相同：`SHQueryUserNotificationState() == QUNS_RUNNING_D3D_FULL_SCREEN`（独占全屏）。命中时置顶热键直接不响应，透明度和退出的热键不受影响。
 
 ## 托盘菜单
 

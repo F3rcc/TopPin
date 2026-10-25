@@ -21,7 +21,7 @@ gcc.exe TopPin.c build\TopPin.res.o -o dist\TopPin.exe ^
   -ffunction-sections -fdata-sections ^
   -fno-asynchronous-unwind-tables -fno-unwind-tables ^
   -Wl,--gc-sections,--dynamicbase,--nxcompat,--high-entropy-va ^
-  -luser32 -lshell32 || exit /b 1
+  -luser32 -lshell32 -ldwmapi || exit /b 1
 
 for %%F in (dist\TopPin.exe) do echo [TopPin] Built %%~zF bytes: %%F
 endlocal

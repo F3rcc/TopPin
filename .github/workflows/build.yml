@@ -41,7 +41,7 @@ jobs:
             -ffunction-sections -fdata-sections \
             -fno-asynchronous-unwind-tables -fno-unwind-tables \
             -Wl,--gc-sections,--dynamicbase,--nxcompat,--high-entropy-va \
-            -luser32 -lshell32
+            -luser32 -lshell32 -ldwmapi
           echo "--- built ---"
           ls -l dist/TopPin.exe
           sha256sum dist/TopPin.exe | tee dist/SHA256SUMS.txt

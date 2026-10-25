@@ -9,10 +9,19 @@
 
 #include <windows.h>
 #include <shellapi.h>
+#include <dwmapi.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <wchar.h>
+#include <math.h>
+
+#ifndef DWMWA_EXTENDED_FRAME_BOUNDS
+#define DWMWA_EXTENDED_FRAME_BOUNDS 9
+#endif
+#ifndef DWMWA_WINDOW_CORNER_PREFERENCE
+#define DWMWA_WINDOW_CORNER_PREFERENCE 33
+#endif
 
 #define APP_NAME L"TopPin"
 #define WINDOW_CLASS L"TopPin.HiddenWindow"
@@ -22,6 +31,8 @@
 #define WM_ALREADY_RUNNING (WM_APP + 2)
 
 #define HOTKEY_TOGGLE 1
+#define HOTKEY_OPACITY_UP 2
+#define HOTKEY_OPACITY_DOWN 3
 #define MENU_TOGGLE 100
 #define MENU_UNPIN_ALL 101
 #define MENU_EXIT 102
@@ -40,15 +51,20 @@
 #define CONFIG_SECTION L"TopPin"
 #define CONFIG_FILE L"TopPin.ini"
 #define DEFAULT_HOTKEY_TEXT L"Ctrl+Alt+T"
-#define DEFAULT_BORDER_COLOR_R 0xFF
-#define DEFAULT_BORDER_COLOR_G 0xB0
-#define DEFAULT_BORDER_COLOR_B 0x20
+#define DEFAULT_OPACITY_UP_TEXT L"Ctrl+Win+="
+#define DEFAULT_OPACITY_DOWN_TEXT L"Ctrl+Win+-"
 
+/* 以下默认值照搬 PowerToys AlwaysOnTop 的 Settings.h */
 #define BORDER_CLASS L"TopPin.BorderWindow"
 #define TIMER_BORDER 1
-#define BORDER_ALPHA 235
-#define BORDER_REFRESH_MS 60
-#define BORDER_MAX_WIDTH 16
+#define BORDER_REFRESH_MS 100
+#define DEFAULT_BORDER_COLOR RGB(0, 173, 239)
+#define DEFAULT_BORDER_THICKNESS 4
+#define DEFAULT_BORDER_OPACITY 100
+#define BORDER_MAX_THICKNESS 32
+#define OPACITY_MIN 20
+#define OPACITY_MAX 100
+#define OPACITY_STEP 10
 
 typedef struct PinnedWindow {
     HWND handle;
@@ -56,6 +72,17 @@ typedef struct PinnedWindow {
     HWND border;
     RECT borderRect;
     int borderWidth;
+    int renderedWidth;
+    int renderedHeight;
+    float renderedRadius;
+    int renderedOpacity;
+    COLORREF renderedColor;
+    int opacityPercent;
+    bool layeredCaptured;
+    bool originalLayered;
+    BYTE originalAlpha;
+    COLORREF originalColorKey;
+    bool originalColorKeyUsed;
 } PinnedWindow;
 
 typedef struct HotkeyConfig {
@@ -77,13 +104,22 @@ static NOTIFYICONDATAW g_tray;
 static PinnedWindow g_pinned[MAX_PINNED];
 static UINT g_pinnedCount;
 static HotkeyConfig g_hotkey = {MOD_CONTROL | MOD_ALT, 'T', DEFAULT_HOTKEY_TEXT};
-static HBRUSH g_borderBrush;
-static COLORREF g_borderColor = RGB(DEFAULT_BORDER_COLOR_R, DEFAULT_BORDER_COLOR_G, DEFAULT_BORDER_COLOR_B);
+static HotkeyConfig g_hotkeyOpacityUp = {MOD_CONTROL | MOD_WIN, VK_OEM_PLUS, DEFAULT_OPACITY_UP_TEXT};
+static HotkeyConfig g_hotkeyOpacityDown = {MOD_CONTROL | MOD_WIN, VK_OEM_MINUS, DEFAULT_OPACITY_DOWN_TEXT};
 static bool g_borderEnabled = true;
-static int g_borderWidth = 3;
+static bool g_borderAccent = true;
+static bool g_borderRoundCorners = true;
+static bool g_blockInGameMode = true;
+static int g_borderThickness = DEFAULT_BORDER_THICKNESS;
+static int g_borderOpacity = DEFAULT_BORDER_OPACITY;
+static COLORREF g_borderColor = DEFAULT_BORDER_COLOR;
 static bool g_borderClassRegistered;
 static bool g_borderTimerActive;
 static bool g_hotkeyFallback;
+static bool g_opacityUpRegistered;
+static bool g_opacityDownRegistered;
+
+static void RestoreWindowOpacity(PinnedWindow *entry);
 static bool g_isElevated;
 static bool g_trayAdded;
 static bool g_hotkeyRegistered;
@@ -232,6 +268,7 @@ static void RemovePinnedAt(UINT index)
     if (index >= g_pinnedCount) {
         return;
     }
+    RestoreWindowOpacity(&g_pinned[index]);
     if (g_pinned[index].border) {
         DestroyWindow(g_pinned[index].border);
     }
@@ -405,6 +442,20 @@ static const KeyName g_keyNames[] = {
     {L"DIVIDE", VK_DIVIDE}
 };
 
+static const KeyName g_punctuationKeys[] = {
+    {L"-", VK_OEM_MINUS},
+    {L"=", VK_OEM_PLUS},
+    {L",", VK_OEM_COMMA},
+    {L".", VK_OEM_PERIOD},
+    {L";", VK_OEM_1},
+    {L"/", VK_OEM_2},
+    {L"`", VK_OEM_3},
+    {L"[", VK_OEM_4},
+    {L"\\", VK_OEM_5},
+    {L"]", VK_OEM_6},
+    {L"'", VK_OEM_7}
+};
+
 static UINT ParseKeyToken(const wchar_t *token)
 {
     if (!token || !*token) {
@@ -420,6 +471,12 @@ static UINT ParseKeyToken(const wchar_t *token)
         if ((character >= L'A' && character <= L'Z') ||
             (character >= L'0' && character <= L'9')) {
             return (UINT)character;
+        }
+    }
+
+    for (size_t i = 0; i < ARRAYSIZE(g_punctuationKeys); ++i) {
+        if (lstrcmpW(token, g_punctuationKeys[i].name) == 0) {
+            return g_punctuationKeys[i].vk;
         }
     }
 
@@ -465,6 +522,12 @@ static bool DescribeKey(UINT key, wchar_t *buffer, int length)
     if (key >= VK_NUMPAD0 && key <= VK_NUMPAD9) {
         wsprintfW(buffer, L"Num%u", key - VK_NUMPAD0);
         return true;
+    }
+    for (size_t i = 0; i < ARRAYSIZE(g_punctuationKeys); ++i) {
+        if (g_punctuationKeys[i].vk == key) {
+            lstrcpynW(buffer, g_punctuationKeys[i].name, length);
+            return true;
+        }
     }
     for (size_t i = 0; i < ARRAYSIZE(g_keyNames); ++i) {
         if (g_keyNames[i].vk == key) {
@@ -583,15 +646,27 @@ static void WriteDefaultConfig(const wchar_t *path)
         L";          主键  ：A-Z  0-9  F1-F24  Space  Tab  Enter  Esc  Insert\r\n"
         L";                  Delete  Home  End  PageUp  PageDown  Up  Down\r\n"
         L";                  Left  Right  Num0-Num9  PrintScreen  Pause\r\n"
-        L"; Border = 1 显示置顶高亮边框，0 关闭（关掉后不再有定时器，更省）\r\n"
-        L"; BorderColor = #RRGGBB\r\n"
-        L"; BorderWidth = 边框宽度（1-16 像素）\r\n"
+        L"; OpacityUpHotkey / OpacityDownHotkey = 调节已置顶窗口不透明度的热键\r\n"
+        L";        每次 10%，范围 20%-100%，只对已置顶窗口生效\r\n"
+        L";\r\n"
+        L"; 以下边框相关默认值照搬 PowerToys AlwaysOnTop\r\n"
+        L"; Border        = 1 显示边框，0 关闭（关掉后不再有定时器）\r\n"
+        L"; BorderColor   = auto 跟随系统主题色，或写 #RRGGBB\r\n"
+        L"; BorderOpacity = 边框不透明度百分比 1-100\r\n"
+        L"; BorderThickness = 边框粗细（像素，会乘 DPI 缩放）1-32\r\n"
+        L"; BorderCorner  = 1 跟随窗口圆角，0 直角\r\n"
+        L"; BlockInGameMode = 1 独占全屏游戏运行时不激活置顶\r\n"
         L"\r\n"
         L"[TopPin]\r\n"
         L"Hotkey=" DEFAULT_HOTKEY_TEXT L"\r\n"
+        L"OpacityUpHotkey=" DEFAULT_OPACITY_UP_TEXT L"\r\n"
+        L"OpacityDownHotkey=" DEFAULT_OPACITY_DOWN_TEXT L"\r\n"
         L"Border=1\r\n"
-        L"BorderColor=#FFB020\r\n"
-        L"BorderWidth=3\r\n";
+        L"BorderColor=auto\r\n"
+        L"BorderOpacity=100\r\n"
+        L"BorderThickness=4\r\n"
+        L"BorderCorner=1\r\n"
+        L"BlockInGameMode=1\r\n";
 
     HANDLE file = CreateFileW(
         path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -611,6 +686,36 @@ static void WriteDefaultConfig(const wchar_t *path)
     CloseHandle(file);
 }
 
+static bool IsTruthy(const wchar_t *value, bool fallback)
+{
+    if (!value || !*value) {
+        return fallback;
+    }
+    return !(value[0] == L'0' || value[0] == L'N' || value[0] == L'n' ||
+             value[0] == L'F' || value[0] == L'f');
+}
+
+static void LoadHotkeySetting(
+    const wchar_t *path,
+    const wchar_t *key,
+    const wchar_t *fallbackText,
+    HotkeyConfig *target,
+    bool *fallbackUsed)
+{
+    wchar_t value[128];
+    GetPrivateProfileStringW(CONFIG_SECTION, key, fallbackText, value, ARRAYSIZE(value), path);
+
+    HotkeyConfig parsed;
+    if (ParseHotkey(value, &parsed)) {
+        *target = parsed;
+        if (fallbackUsed) {
+            *fallbackUsed = false;
+        }
+    } else if (fallbackUsed) {
+        *fallbackUsed = true;
+    }
+}
+
 static void LoadConfig(void)
 {
     wchar_t path[MAX_PATH];
@@ -622,41 +727,60 @@ static void LoadConfig(void)
 
     wchar_t value[128];
 
-    GetPrivateProfileStringW(
-        CONFIG_SECTION, L"Hotkey", DEFAULT_HOTKEY_TEXT, value, ARRAYSIZE(value), path);
-    HotkeyConfig parsed;
-    if (ParseHotkey(value, &parsed)) {
-        g_hotkey = parsed;
-        g_hotkeyFallback = false;
-    } else {
-        g_hotkeyFallback = true;
-    }
+    LoadHotkeySetting(path, L"Hotkey", DEFAULT_HOTKEY_TEXT, &g_hotkey, &g_hotkeyFallback);
+    LoadHotkeySetting(path, L"OpacityUpHotkey", DEFAULT_OPACITY_UP_TEXT, &g_hotkeyOpacityUp, NULL);
+    LoadHotkeySetting(path, L"OpacityDownHotkey", DEFAULT_OPACITY_DOWN_TEXT, &g_hotkeyOpacityDown, NULL);
 
     GetPrivateProfileStringW(CONFIG_SECTION, L"Border", L"1", value, ARRAYSIZE(value), path);
-    g_borderEnabled = !(value[0] == L'0' || value[0] == L'N' || value[0] == L'n' ||
-                        value[0] == L'F' || value[0] == L'f');
+    g_borderEnabled = IsTruthy(value, true);
+
+    GetPrivateProfileStringW(CONFIG_SECTION, L"BorderColor", L"auto", value, ARRAYSIZE(value), path);
+    if (lstrcmpiW(value, L"auto") == 0 || lstrcmpiW(value, L"system") == 0) {
+        g_borderAccent = true;
+    } else {
+        COLORREF color;
+        if (ParseColor(value, &color)) {
+            g_borderColor = color;
+            g_borderAccent = false;
+        } else {
+            g_borderAccent = true;
+        }
+    }
 
     GetPrivateProfileStringW(
-        CONFIG_SECTION, L"BorderColor", L"#FFB020", value, ARRAYSIZE(value), path);
-    COLORREF color;
-    if (ParseColor(value, &color)) {
-        g_borderColor = color;
+        CONFIG_SECTION, L"BorderThickness", L"4", value, ARRAYSIZE(value), path);
+    long thickness = wcstol(value, NULL, 10);
+    if (thickness < 1) {
+        thickness = 1;
     }
+    if (thickness > BORDER_MAX_THICKNESS) {
+        thickness = BORDER_MAX_THICKNESS;
+    }
+    g_borderThickness = (int)thickness;
 
-    GetPrivateProfileStringW(CONFIG_SECTION, L"BorderWidth", L"3", value, ARRAYSIZE(value), path);
-    long width = wcstol(value, NULL, 10);
-    if (width < 1) {
-        width = 1;
+    GetPrivateProfileStringW(CONFIG_SECTION, L"BorderOpacity", L"100", value, ARRAYSIZE(value), path);
+    long borderOpacity = wcstol(value, NULL, 10);
+    if (borderOpacity < 1) {
+        borderOpacity = 1;
     }
-    if (width > BORDER_MAX_WIDTH) {
-        width = BORDER_MAX_WIDTH;
+    if (borderOpacity > 100) {
+        borderOpacity = 100;
     }
-    g_borderWidth = (int)width;
+    g_borderOpacity = (int)borderOpacity;
 
-    if (g_borderBrush) {
-        DeleteObject(g_borderBrush);
+    GetPrivateProfileStringW(CONFIG_SECTION, L"BorderCorner", L"1", value, ARRAYSIZE(value), path);
+    g_borderRoundCorners = IsTruthy(value, true);
+
+    GetPrivateProfileStringW(CONFIG_SECTION, L"BlockInGameMode", L"1", value, ARRAYSIZE(value), path);
+    g_blockInGameMode = IsTruthy(value, true);
+}
+
+static bool RegisterOneHotkey(int id, const HotkeyConfig *config)
+{
+    if (!g_window || config->vk == 0 || config->modifiers == 0) {
+        return false;
     }
-    g_borderBrush = CreateSolidBrush(g_borderColor);
+    return RegisterHotKey(g_window, id, config->modifiers | MOD_NOREPEAT, config->vk) != FALSE;
 }
 
 static bool TryRegisterHotkey(void)
@@ -668,40 +792,112 @@ static bool TryRegisterHotkey(void)
         UnregisterHotKey(g_window, HOTKEY_TOGGLE);
         g_hotkeyRegistered = false;
     }
-    g_hotkeyRegistered = RegisterHotKey(
-                             g_window,
-                             HOTKEY_TOGGLE,
-                             g_hotkey.modifiers | MOD_NOREPEAT,
-                             g_hotkey.vk) != FALSE;
+    if (g_opacityUpRegistered) {
+        UnregisterHotKey(g_window, HOTKEY_OPACITY_UP);
+        g_opacityUpRegistered = false;
+    }
+    if (g_opacityDownRegistered) {
+        UnregisterHotKey(g_window, HOTKEY_OPACITY_DOWN);
+        g_opacityDownRegistered = false;
+    }
+
+    g_hotkeyRegistered = RegisterOneHotkey(HOTKEY_TOGGLE, &g_hotkey);
+    g_opacityUpRegistered = RegisterOneHotkey(HOTKEY_OPACITY_UP, &g_hotkeyOpacityUp);
+    g_opacityDownRegistered = RegisterOneHotkey(HOTKEY_OPACITY_DOWN, &g_hotkeyOpacityDown);
     return g_hotkeyRegistered;
 }
 
-/* ------------------------------------------------------------ 高亮边框 --- */
+/* ------------------------------------------------- 系统集成与边框渲染 --- */
+
+typedef UINT(WINAPI *GetDpiForWindowFn)(HWND);
+
+static float GetDpiScale(HWND window)
+{
+    static GetDpiForWindowFn getDpiForWindow;
+    static bool looked = false;
+
+    if (!looked) {
+        looked = true;
+        HMODULE user32 = GetModuleHandleW(L"user32.dll");
+        if (user32) {
+            getDpiForWindow = (GetDpiForWindowFn)(uintptr_t)GetProcAddress(user32, "GetDpiForWindow");
+        }
+    }
+
+    if (getDpiForWindow) {
+        UINT dpi = getDpiForWindow(window);
+        if (dpi != 0) {
+            return (float)dpi / 96.0f;
+        }
+    }
+    return 1.0f;
+}
+
+static COLORREF GetSystemAccentColor(void)
+{
+    DWORD value = 0;
+    DWORD size = sizeof(value);
+
+    if (RegGetValueW(
+            HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows\\DWM",
+            L"AccentColor",
+            RRF_RT_REG_DWORD,
+            NULL,
+            &value,
+            &size) == ERROR_SUCCESS) {
+        /* AccentColor 存的是 0xAABBGGRR */
+        return RGB(value & 0xFF, (value >> 8) & 0xFF, (value >> 16) & 0xFF);
+    }
+    return DEFAULT_BORDER_COLOR;
+}
+
+/* 与 PowerToys 一致：独占全屏 D3D 程序运行时不激活 */
+static bool IsGameModeActive(void)
+{
+    QUERY_USER_NOTIFICATION_STATE state;
+    if (SHQueryUserNotificationState(&state) != S_OK) {
+        return false;
+    }
+    return state == QUNS_RUNNING_D3D_FULL_SCREEN;
+}
+
+/* 与 PowerToys WindowCornerUtils::CornersRadius 一致 */
+static float GetWindowCornerRadius(HWND target)
+{
+    int preference = -1;
+    if (FAILED(DwmGetWindowAttribute(
+            target,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &preference,
+            sizeof(preference)))) {
+        return 0.0f;
+    }
+
+    switch (preference) {
+        case 2: /* DWMWCP_ROUND */
+            return 8.0f;
+        case 3: /* DWMWCP_ROUNDSMALL */
+            return 4.0f;
+        case 0: /* DWMWCP_DEFAULT */
+            return 8.0f;
+        default:
+            return 0.0f;
+    }
+}
 
 static LRESULT CALLBACK BorderProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
 {
+    (void)wParam;
     (void)lParam;
     switch (message) {
-        case WM_ERASEBKGND: {
-            RECT rect;
-            GetClientRect(window, &rect);
-            FillRect((HDC)wParam, &rect, g_borderBrush);
+        case WM_ERASEBKGND:
             return 1;
-        }
-
-        case WM_PAINT: {
-            PAINTSTRUCT paint;
-            HDC dc = BeginPaint(window, &paint);
-            RECT rect;
-            GetClientRect(window, &rect);
-            FillRect(dc, &rect, g_borderBrush);
-            EndPaint(window, &paint);
-            return 0;
-        }
-
+        case WM_SETCURSOR:
+            SetCursor(LoadCursorW(NULL, IDC_ARROW));
+            return TRUE;
         case WM_NCHITTEST:
             return HTTRANSPARENT;
-
         case WM_MOUSEACTIVATE:
             return MA_NOACTIVATE;
     }
@@ -710,7 +906,7 @@ static LRESULT CALLBACK BorderProc(HWND window, UINT message, WPARAM wParam, LPA
 
 static HWND CreateBorderWindow(void)
 {
-    if (!g_borderEnabled || !g_borderBrush) {
+    if (!g_borderEnabled) {
         return NULL;
     }
 
@@ -720,6 +916,7 @@ static HWND CreateBorderWindow(void)
             .cbSize = sizeof(borderClass),
             .lpfnWndProc = BorderProc,
             .hInstance = instance,
+            .hCursor = LoadCursorW(NULL, IDC_ARROW),
             .lpszClassName = BORDER_CLASS
         };
         g_borderClassRegistered = RegisterClassExW(&borderClass) != 0;
@@ -741,16 +938,173 @@ static HWND CreateBorderWindow(void)
         NULL,
         instance,
         NULL);
-    if (!border) {
-        return NULL;
+    if (border) {
+        ShowWindow(border, SW_SHOWNA);
     }
-    SetLayeredWindowAttributes(border, 0, BORDER_ALPHA, LWA_ALPHA);
     return border;
+}
+
+/*
+ * PowerToys FrameDrawer 的几何照搬：
+ *   描边中心线 = 客户区向内 (thickness / 2 + 1) 的圆角矩形
+ *   描边宽度   = thickness
+ * 用圆角矩形有符号距离场逐像素算覆盖率，得到和 D2D 一样平滑的圆环。
+ * 只遍历靠近四边的“边框带”，中间像素保持全透明（省掉 99% 的运算）。
+ */
+static void RenderBorder(
+    PinnedWindow *entry,
+    RECT frame,
+    int thickness,
+    float radius,
+    COLORREF color,
+    int opacityPercent)
+{
+    int width = frame.right - frame.left;
+    int height = frame.bottom - frame.top;
+    if (width < 4 || height < 4) {
+        return;
+    }
+
+    BITMAPINFO bitmapInfo;
+    ZeroMemory(&bitmapInfo, sizeof(bitmapInfo));
+    bitmapInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bitmapInfo.bmiHeader.biWidth = width;
+    bitmapInfo.bmiHeader.biHeight = -height;
+    bitmapInfo.bmiHeader.biPlanes = 1;
+    bitmapInfo.bmiHeader.biBitCount = 32;
+    bitmapInfo.bmiHeader.biCompression = BI_RGB;
+
+    HDC screen = GetDC(NULL);
+    if (!screen) {
+        return;
+    }
+
+    void *bits = NULL;
+    HBITMAP dib = CreateDIBSection(screen, &bitmapInfo, DIB_RGB_COLORS, &bits, NULL, 0);
+    if (!dib || !bits) {
+        if (dib) {
+            DeleteObject(dib);
+        }
+        ReleaseDC(NULL, screen);
+        return;
+    }
+
+    float halfThickness = (float)thickness / 2.0f;
+    float centerX = (float)width / 2.0f;
+    float centerY = (float)height / 2.0f;
+    float halfX = ((float)width - 2.0f - (float)thickness) / 2.0f;
+    float halfY = ((float)height - 2.0f - (float)thickness) / 2.0f;
+    if (halfX < 0.0f) {
+        halfX = 0.0f;
+    }
+    if (halfY < 0.0f) {
+        halfY = 0.0f;
+    }
+
+    float cornerRadius = radius;
+    float maxRadius = halfX < halfY ? halfX : halfY;
+    if (cornerRadius > maxRadius) {
+        cornerRadius = maxRadius;
+    }
+
+    float alphaMax = (float)opacityPercent / 100.0f;
+    if (alphaMax > 1.0f) {
+        alphaMax = 1.0f;
+    }
+    if (alphaMax < 0.0f) {
+        alphaMax = 0.0f;
+    }
+
+    unsigned char red = GetRValue(color);
+    unsigned char green = GetGValue(color);
+    unsigned char blue = GetBValue(color);
+
+    int band = (int)((float)thickness + radius + 4.0f);
+    unsigned char *pixels = (unsigned char *)bits;
+
+    for (int y = 0; y < height; ++y) {
+        bool rowInBand = (y < band) || (y >= height - band);
+        for (int x = 0; x < width; ++x) {
+            if (!rowInBand && x >= band && x < width - band) {
+                x = width - band - 1;
+                continue;
+            }
+
+            float px = (float)x + 0.5f - centerX;
+            float py = (float)y + 0.5f - centerY;
+            float qx = (px < 0.0f ? -px : px) - halfX + cornerRadius;
+            float qy = (py < 0.0f ? -py : py) - halfY + cornerRadius;
+
+            float outsideX = qx > 0.0f ? qx : 0.0f;
+            float outsideY = qy > 0.0f ? qy : 0.0f;
+            float maxQ = qx > qy ? qx : qy;
+            float inside = maxQ < 0.0f ? maxQ : 0.0f;
+            float distance = sqrtf(outsideX * outsideX + outsideY * outsideY) + inside - cornerRadius;
+
+            float delta = distance < 0.0f ? -distance : distance;
+            float coverage = halfThickness + 0.5f - delta;
+            if (coverage <= 0.0f) {
+                continue;
+            }
+            if (coverage > 1.0f) {
+                coverage = 1.0f;
+            }
+
+            float alpha = coverage * alphaMax;
+            if (alpha <= 0.0f) {
+                continue;
+            }
+
+            int index = (y * width + x) * 4;
+            pixels[index + 0] = (unsigned char)((float)blue * alpha);
+            pixels[index + 1] = (unsigned char)((float)green * alpha);
+            pixels[index + 2] = (unsigned char)((float)red * alpha);
+            pixels[index + 3] = (unsigned char)(alpha * 255.0f);
+        }
+    }
+
+    HDC memory = CreateCompatibleDC(screen);
+    if (memory) {
+        HGDIOBJ previous = SelectObject(memory, dib);
+        POINT source = {0, 0};
+        POINT destination = {frame.left, frame.top};
+        SIZE size = {width, height};
+        BLENDFUNCTION blend;
+        blend.BlendOp = AC_SRC_OVER;
+        blend.BlendFlags = 0;
+        blend.SourceConstantAlpha = 255;
+        blend.AlphaFormat = AC_SRC_ALPHA;
+
+        UpdateLayeredWindow(entry->border, screen, &destination, &size, memory, &source, 0, &blend, ULW_ALPHA);
+
+        SelectObject(memory, previous);
+        DeleteDC(memory);
+    }
+
+    DeleteObject(dib);
+    ReleaseDC(NULL, screen);
+}
+
+/* 与 PowerToys GetFrameRect 一致：扩展边框矩形向外扩一圈 */
+static bool GetBorderFrame(HWND target, int thickness, RECT *frame)
+{
+    RECT rect;
+    if (FAILED(DwmGetWindowAttribute(target, DWMWA_EXTENDED_FRAME_BOUNDS, &rect, sizeof(rect)))) {
+        if (!GetWindowRect(target, &rect)) {
+            return false;
+        }
+    }
+    rect.left -= thickness;
+    rect.top -= thickness;
+    rect.right += thickness;
+    rect.bottom += thickness;
+    *frame = rect;
+    return true;
 }
 
 static void UpdatePinnedBorder(PinnedWindow *entry)
 {
-    if (!entry->border) {
+    if (!entry->border || !g_borderEnabled) {
         return;
     }
 
@@ -761,58 +1115,48 @@ static void UpdatePinnedBorder(PinnedWindow *entry)
         return;
     }
 
-    RECT rect;
-    if (!GetWindowRect(target, &rect)) {
+    float scale = GetDpiScale(target);
+    int thickness = (int)((float)g_borderThickness * scale);
+    if (thickness < 1) {
+        thickness = 1;
+    }
+    float radius = g_borderRoundCorners ? GetWindowCornerRadius(target) * scale : 0.0f;
+    COLORREF color = g_borderAccent ? GetSystemAccentColor() : g_borderColor;
+
+    RECT frame;
+    if (!GetBorderFrame(target, thickness, &frame)) {
         ShowWindow(entry->border, SW_HIDE);
         entry->borderWidth = 0;
         return;
     }
 
-    int width = g_borderWidth;
-    int frameWidth = (rect.right - rect.left) + width * 2;
-    int frameHeight = (rect.bottom - rect.top) + width * 2;
-    if (frameWidth <= width * 2 + 1 || frameHeight <= width * 2 + 1) {
-        ShowWindow(entry->border, SW_HIDE);
-        entry->borderWidth = 0;
+    if (!IsWindowVisible(entry->border)) {
+        ShowWindow(entry->border, SW_SHOWNA);
+    }
+
+    bool unchanged = entry->borderWidth == thickness &&
+                     entry->renderedWidth == frame.right - frame.left &&
+                     entry->renderedHeight == frame.bottom - frame.top &&
+                     entry->renderedOpacity == g_borderOpacity &&
+                     entry->renderedColor == color &&
+                     fabsf(entry->renderedRadius - radius) < 0.01f &&
+                     EqualRect(&entry->borderRect, &frame);
+
+    if (unchanged) {
+        SetWindowPos(entry->border, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         return;
     }
 
-    if (entry->borderWidth == width && EqualRect(&entry->borderRect, &rect) &&
-        IsWindowVisible(entry->border)) {
-        SetWindowPos(
-            entry->border,
-            HWND_TOPMOST,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        return;
-    }
+    RenderBorder(entry, frame, thickness, radius, color, g_borderOpacity);
+    SetWindowPos(entry->border, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 
-    HRGN outer = CreateRectRgn(0, 0, frameWidth, frameHeight);
-    HRGN inner = CreateRectRgn(width, width, frameWidth - width, frameHeight - width);
-    if (outer && inner) {
-        CombineRgn(outer, outer, inner, RGN_DIFF);
-    }
-    if (inner) {
-        DeleteObject(inner);
-    }
-    if (outer && !SetWindowRgn(entry->border, outer, TRUE)) {
-        DeleteObject(outer);
-    }
-
-    SetWindowPos(
-        entry->border,
-        HWND_TOPMOST,
-        rect.left - width,
-        rect.top - width,
-        frameWidth,
-        frameHeight,
-        SWP_NOACTIVATE | SWP_SHOWWINDOW);
-
-    entry->borderRect = rect;
-    entry->borderWidth = width;
+    entry->borderRect = frame;
+    entry->borderWidth = thickness;
+    entry->renderedRadius = radius;
+    entry->renderedColor = color;
+    entry->renderedOpacity = g_borderOpacity;
+    entry->renderedWidth = frame.right - frame.left;
+    entry->renderedHeight = frame.bottom - frame.top;
 }
 
 static void StartBorderTimer(void)
@@ -863,7 +1207,6 @@ static void ApplyBorderSettings(void)
         }
         g_pinned[i].borderWidth = 0;
         if (g_pinned[i].border) {
-            InvalidateRect(g_pinned[i].border, NULL, TRUE);
             any = true;
         }
     }
@@ -874,6 +1217,116 @@ static void ApplyBorderSettings(void)
     } else {
         StopBorderTimer();
     }
+}
+
+/* --------------------------------------------------------- 窗口不透明度 --- */
+
+static void ApplyWindowOpacity(PinnedWindow *entry, int percent)
+{
+    if (!entry->handle || !IsWindow(entry->handle)) {
+        return;
+    }
+
+    if (percent < OPACITY_MIN) {
+        percent = OPACITY_MIN;
+    }
+    if (percent > OPACITY_MAX) {
+        percent = OPACITY_MAX;
+    }
+
+    LONG_PTR style = GetWindowLongPtrW(entry->handle, GWL_EXSTYLE);
+    bool layered = (style & WS_EX_LAYERED) != 0;
+
+    if (!entry->layeredCaptured) {
+        entry->originalLayered = layered;
+        entry->originalAlpha = 255;
+        entry->originalColorKey = 0;
+        entry->originalColorKeyUsed = false;
+
+        if (layered) {
+            BYTE alpha = 255;
+            COLORREF key = 0;
+            DWORD flags = 0;
+            if (!GetLayeredWindowAttributes(entry->handle, &key, &alpha, &flags)) {
+                return;
+            }
+            entry->originalAlpha = alpha;
+            entry->originalColorKey = key;
+            entry->originalColorKeyUsed = (flags & LWA_COLORKEY) != 0;
+        }
+        entry->layeredCaptured = true;
+    }
+
+    if (layered) {
+        SetWindowLongPtrW(entry->handle, GWL_EXSTYLE, style & ~WS_EX_LAYERED);
+        SetWindowPos(
+            entry->handle,
+            NULL,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        style = GetWindowLongPtrW(entry->handle, GWL_EXSTYLE);
+    }
+
+    BYTE alphaValue = (BYTE)((255 * percent) / 100);
+    SetWindowLongPtrW(entry->handle, GWL_EXSTYLE, style | WS_EX_LAYERED);
+    SetLayeredWindowAttributes(entry->handle, 0, alphaValue, LWA_ALPHA);
+    entry->opacityPercent = percent;
+}
+
+static void RestoreWindowOpacity(PinnedWindow *entry)
+{
+    if (!entry->handle || !IsWindow(entry->handle) || !entry->layeredCaptured) {
+        return;
+    }
+
+    LONG_PTR style = GetWindowLongPtrW(entry->handle, GWL_EXSTYLE);
+
+    if (entry->originalLayered) {
+        if (style & WS_EX_LAYERED) {
+            SetWindowLongPtrW(entry->handle, GWL_EXSTYLE, style & ~WS_EX_LAYERED);
+            style = GetWindowLongPtrW(entry->handle, GWL_EXSTYLE);
+        }
+        SetWindowLongPtrW(entry->handle, GWL_EXSTYLE, style | WS_EX_LAYERED);
+
+        DWORD flags = LWA_ALPHA;
+        if (entry->originalColorKeyUsed) {
+            flags |= LWA_COLORKEY;
+        }
+        SetLayeredWindowAttributes(
+            entry->handle, entry->originalColorKey, entry->originalAlpha, flags);
+    } else if (style & WS_EX_LAYERED) {
+        SetWindowLongPtrW(entry->handle, GWL_EXSTYLE, style & ~WS_EX_LAYERED);
+    }
+
+    SetWindowPos(
+        entry->handle,
+        NULL,
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+
+    entry->layeredCaptured = false;
+    entry->opacityPercent = OPACITY_MAX;
+}
+
+static void StepWindowOpacity(HWND foreground, int delta)
+{
+    if (!foreground || !IsWindow(foreground)) {
+        return;
+    }
+
+    int index = FindPinnedWindow(foreground);
+    if (index < 0) {
+        return;
+    }
+
+    PinnedWindow *entry = &g_pinned[index];
+    ApplyWindowOpacity(entry, entry->opacityPercent + delta);
 }
 
 static void OpenConfigFile(void)
@@ -902,6 +1355,10 @@ static void ReloadConfiguration(void)
 
 static void ToggleWindow(HWND window)
 {
+    if (g_blockInGameMode && IsGameModeActive()) {
+        return;
+    }
+
     if (!IsEligibleWindow(window)) {
         ShowTrayMessage(APP_NAME, L"请先点一下需要置顶的窗口。");
         return;
@@ -934,6 +1391,17 @@ static void ToggleWindow(HWND window)
             entry->border = CreateBorderWindow();
             SetRectEmpty(&entry->borderRect);
             entry->borderWidth = 0;
+            entry->renderedWidth = 0;
+            entry->renderedHeight = 0;
+            entry->renderedRadius = 0.0f;
+            entry->renderedOpacity = 0;
+            entry->renderedColor = 0;
+            entry->opacityPercent = OPACITY_MAX;
+            entry->layeredCaptured = false;
+            entry->originalLayered = false;
+            entry->originalAlpha = 255;
+            entry->originalColorKey = 0;
+            entry->originalColorKeyUsed = false;
             ++g_pinnedCount;
             if (entry->border) {
                 UpdatePinnedBorder(entry);
@@ -999,13 +1467,17 @@ static void CleanupApplication(void)
     g_cleanedUp = true;
     UnpinAll(false);
     StopBorderTimer();
-    if (g_borderBrush) {
-        DeleteObject(g_borderBrush);
-        g_borderBrush = NULL;
-    }
     if (g_hotkeyRegistered) {
         UnregisterHotKey(g_window, HOTKEY_TOGGLE);
         g_hotkeyRegistered = false;
+    }
+    if (g_opacityUpRegistered) {
+        UnregisterHotKey(g_window, HOTKEY_OPACITY_UP);
+        g_opacityUpRegistered = false;
+    }
+    if (g_opacityDownRegistered) {
+        UnregisterHotKey(g_window, HOTKEY_OPACITY_DOWN);
+        g_opacityDownRegistered = false;
     }
     if (g_foregroundHook) {
         UnhookWinEvent(g_foregroundHook);
@@ -1133,6 +1605,10 @@ static LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPA
         case WM_HOTKEY:
             if (wParam == HOTKEY_TOGGLE) {
                 ToggleCurrentTarget();
+            } else if (wParam == HOTKEY_OPACITY_UP) {
+                StepWindowOpacity(GetForegroundWindow(), OPACITY_STEP);
+            } else if (wParam == HOTKEY_OPACITY_DOWN) {
+                StepWindowOpacity(GetForegroundWindow(), -OPACITY_STEP);
             }
             return 0;
 
