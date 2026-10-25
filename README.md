@@ -6,13 +6,38 @@
   <img src="Assets/TopPin-icon-preview.png" width="128" alt="TopPin 图标">
 </p>
 
-<p align="center"><strong>一个只有窗口置顶功能的 50 KB Windows 小工具。</strong></p>
+<p align="center"><strong>一个只有窗口置顶功能的 Windows 小工具（约 65 KB）。</strong></p>
 
 TopPin 使用原生 Win32 C 编写。它没有主窗口、安装程序、后台服务或联网功能：运行后进入系统托盘，按一次快捷键置顶当前窗口，再按一次取消。
 
-## 本分支的定制
+> **这是二创项目。** 本仓库基于原作者 [chiimyen/TopPin](https://github.com/chiimyen/TopPin)，并把
+> [Microsoft PowerToys](https://github.com/microsoft/PowerToys) 的 `AlwaysOnTop` 模块的边框外观、
+> 不透明度调节、游戏模式判定与拖动跟随策略移植了过来。详细署名、源文件对照与许可见
+> **[ATTRIBUTION.md](ATTRIBUTION.md)**。与 Microsoft / PowerToys 官方无任何关系。
 
-这是 [F3rcc/TopPin](https://github.com/F3rcc/TopPin)，在上游 `chiimyen/TopPin` 基础上加了这些功能：
+## 二创声明
+
+本项目是**二次创作（derivative work）**，不是原创：
+
+| 来源 | 用在本项目的部分 | 许可 |
+| --- | --- | --- |
+| [**chiimyen/TopPin**](https://github.com/chiimyen/TopPin) | 原始项目骨架：托盘常驻、单实例、全局热键、置顶/取消、管理员提权、开机自启 | MIT，© 2026 chiimyen |
+| [**Microsoft PowerToys**](https://github.com/microsoft/PowerToys) → `AlwaysOnTop` | 边框几何与默认外观、不透明度调节、游戏模式判定、拖动跟随策略 | MIT，© Microsoft Corporation |
+
+具体对照了 PowerToys 的 `src/modules/alwaysontop/AlwaysOnTop/` 下这些文件：`WindowBorder.cpp`
+（`GetFrameRect`、`UpdateBorderPosition`、100 ms 间隔）、`FrameDrawer.cpp`（描边内缩 `thickness/2+1`、
+圆环由内外圆角矩形做差）、`Settings.h`（全部默认值）、`WindowCornersUtil.cpp`（圆角半径映射）、
+`AlwaysOnTop.cpp`（不透明度步进与 layered 状态还原、`EVENT_OBJECT_LOCATIONCHANGE` 订阅），
+以及 `src/common/utils/game_mode.h`（游戏判定）。
+
+C 代码是本分支自行编写的，没有从 PowerToys 复制 C++ 源文件；对齐的是几何规则、默认参数和交互语义。
+渲染管线也不同：PowerToys 用 Direct2D，本分支用 GDI 位图 + 圆角矩形距离场自算抗锯齿。
+
+上游 TopPin 与 PowerToys 均为 MIT 许可；完整许可文本与免责声明见 [ATTRIBUTION.md](ATTRIBUTION.md)。
+
+## 本分支相对上游的改动
+
+在上游 `chiimyen/TopPin` 基础上加了这些功能：
 
 - **热键可配置**：不再写死 `Ctrl+Alt+T`，改 `TopPin.ini` 即可，托盘菜单可直接打开/重载配置。
 - **PowerToys 同款置顶边框**：几何、默认外观、圆角规则全部照搬 PowerToys `AlwaysOnTop` 模块（见下方“边框是怎么画的”）。
@@ -39,6 +64,7 @@ TopPin 使用原生 Win32 C 编写。它没有主窗口、安装程序、后台�
 - 置顶窗口周围显示一圈 PowerToys 风格的边框：默认跟随系统主题色、4px、随窗口圆角、DPI 自适应。
 - 可调已置顶窗口的不透明度（20%–100%，步长 10%），取消置顶自动还原。
 - 独占全屏游戏运行时不激活，默认开启。
+- 托盘菜单可一键「关闭通知 / 开启通知」，状态写回配置。
 - 托盘菜单查看和取消已置顶窗口。
 - 可选开机自动启动，默认关闭。
 - 遇到管理员窗口时按需请求 Windows UAC 权限。
