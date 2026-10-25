@@ -1032,22 +1032,51 @@ static void RenderBorder(
 
             float px = (float)x + 0.5f - centerX;
             float py = (float)y + 0.5f - centerY;
-            float qx = (px < 0.0f ? -px : px) - halfX + cornerRadius;
-            float qy = (py < 0.0f ? -py : py) - halfY + cornerRadius;
+            float coverage;
 
-            float outsideX = qx > 0.0f ? qx : 0.0f;
-            float outsideY = qy > 0.0f ? qy : 0.0f;
-            float maxQ = qx > qy ? qx : qy;
-            float inside = maxQ < 0.0f ? maxQ : 0.0f;
-            float distance = sqrtf(outsideX * outsideX + outsideY * outsideY) + inside - cornerRadius;
+            if (cornerRadius <= 0.01f) {
+                /* 直角：PowerToys 的 D2D 描边是尖角，用矩形内外框做覆盖率 */
+                float absoluteX = px < 0.0f ? -px : px;
+                float absoluteY = py < 0.0f ? -py : py;
+                float outerX = absoluteX - (halfX + halfThickness);
+                float outerY = absoluteY - (halfY + halfThickness);
+                float innerX = absoluteX - (halfX - halfThickness);
+                float innerY = absoluteY - (halfY - halfThickness);
+                float outerDistance = outerX > outerY ? outerX : outerY;
+                float innerDistance = innerX > innerY ? innerX : innerY;
 
-            float delta = distance < 0.0f ? -distance : distance;
-            float coverage = halfThickness + 0.5f - delta;
-            if (coverage <= 0.0f) {
-                continue;
-            }
-            if (coverage > 1.0f) {
-                coverage = 1.0f;
+                float outerCoverage = 0.5f - outerDistance;
+                float innerCoverage = 0.5f + innerDistance;
+                if (outerCoverage <= 0.0f || innerCoverage <= 0.0f) {
+                    continue;
+                }
+                if (outerCoverage > 1.0f) {
+                    outerCoverage = 1.0f;
+                }
+                if (innerCoverage > 1.0f) {
+                    innerCoverage = 1.0f;
+                }
+                coverage = outerCoverage * innerCoverage;
+            } else {
+                /* 圆角：圆角矩形有符号距离场 */
+                float qx = (px < 0.0f ? -px : px) - halfX + cornerRadius;
+                float qy = (py < 0.0f ? -py : py) - halfY + cornerRadius;
+
+                float outsideX = qx > 0.0f ? qx : 0.0f;
+                float outsideY = qy > 0.0f ? qy : 0.0f;
+                float maxQ = qx > qy ? qx : qy;
+                float inside = maxQ < 0.0f ? maxQ : 0.0f;
+                float distance =
+                    sqrtf(outsideX * outsideX + outsideY * outsideY) + inside - cornerRadius;
+
+                float delta = distance < 0.0f ? -distance : distance;
+                coverage = halfThickness + 0.5f - delta;
+                if (coverage <= 0.0f) {
+                    continue;
+                }
+                if (coverage > 1.0f) {
+                    coverage = 1.0f;
+                }
             }
 
             float alpha = coverage * alphaMax;
