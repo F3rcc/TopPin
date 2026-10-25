@@ -61,6 +61,7 @@ BorderOpacity=100
 BorderThickness=4
 BorderCorner=1
 BlockInGameMode=1
+Notify=1
 ```
 
 | 键 | 说明 | PowerToys 默认 |
@@ -74,6 +75,7 @@ BlockInGameMode=1
 | `BorderThickness` | 边框粗细（像素，会乘 DPI 缩放），1–32 | `4` |
 | `BorderCorner` | `1` 跟随窗口圆角，`0` 直角 | `1` |
 | `BlockInGameMode` | `1` 独占全屏游戏时不激活 | `1` |
+| `Notify` | `1` 显示托盘气泡提示，`0` 关闭；也可直接用托盘菜单的「关闭通知」切换（会自动写回本文件） | `1` |
 
 热键主键支持 `A-Z`、`0-9`、`F1-F24`、`Space`、`Tab`、`Enter`、`Esc`、`Insert`、`Delete`、`Home`、`End`、`PageUp`、`PageDown`、`Up`、`Down`、`Left`、`Right`、`Num0-Num9`、`PrintScreen`、`Pause`，以及 `-` `=` `,` `.` `;` `/` `[` `\` `]` `'` 和反引号。大小写不敏感，空格会被忽略。
 
@@ -115,6 +117,7 @@ BlockInGameMode=1
 - **取消全部置顶**：一次恢复所有窗口。
 - **重新加载配置**：重新读取 `TopPin.ini` 并重注册快捷键。
 - **打开配置文件…**：用默认编辑器打开 `TopPin.ini`。
+- **关闭通知 / 开启通知**：一键开运气泡提示，状态会写回 `TopPin.ini` 的 `Notify`。
 - **开机自动启动**：写入或删除当前用户的 Windows `Run` 启动项。
 - **以管理员身份重新启动**：通过标准 UAC 流程控制管理员窗口。
 - **退出 TopPin**：恢复窗口后退出。

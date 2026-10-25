@@ -50,6 +50,7 @@
 
 #define MENU_CONFIG 105
 #define MENU_RELOAD 106
+#define MENU_NOTIFY 107
 
 #define CONFIG_SECTION L"TopPin"
 #define CONFIG_FILE L"TopPin.ini"
@@ -122,6 +123,7 @@ static COLORREF g_accentColor = DEFAULT_BORDER_COLOR;
 static bool g_borderClassRegistered;
 static bool g_borderTimerActive;
 static bool g_hotkeyFallback;
+static bool g_notificationsEnabled = true;
 static bool g_opacityUpRegistered;
 static bool g_opacityDownRegistered;
 
@@ -323,6 +325,9 @@ static DWORD WINAPI TrayMessageThread(void *parameter)
 
 static void ShowTrayMessage(const wchar_t *title, const wchar_t *message)
 {
+    if (!g_notificationsEnabled) {
+        return;
+    }
     if (InterlockedCompareExchange(&g_notificationActive, 1, 0) != 0) {
         return;
     }
@@ -663,6 +668,7 @@ static void WriteDefaultConfig(const wchar_t *path)
         L"; BorderThickness = 边框粗细（像素，会乘 DPI 缩放）1-32\r\n"
         L"; BorderCorner  = 1 跟随窗口圆角，0 直角\r\n"
         L"; BlockInGameMode = 1 独占全屏游戏运行时不激活置顶\r\n"
+        L"; Notify        = 1 显示托盘气泡提示，0 关闭（等价于托盘菜单的“关闭通知”）\r\n"
         L"\r\n"
         L"[TopPin]\r\n"
         L"Hotkey=" DEFAULT_HOTKEY_TEXT L"\r\n"
@@ -673,7 +679,8 @@ static void WriteDefaultConfig(const wchar_t *path)
         L"BorderOpacity=100\r\n"
         L"BorderThickness=4\r\n"
         L"BorderCorner=1\r\n"
-        L"BlockInGameMode=1\r\n";
+        L"BlockInGameMode=1\r\n"
+        L"Notify=1\r\n";
 
     HANDLE file = CreateFileW(
         path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -780,6 +787,9 @@ static void LoadConfig(void)
 
     GetPrivateProfileStringW(CONFIG_SECTION, L"BlockInGameMode", L"1", value, ARRAYSIZE(value), path);
     g_blockInGameMode = IsTruthy(value, true);
+
+    GetPrivateProfileStringW(CONFIG_SECTION, L"Notify", L"1", value, ARRAYSIZE(value), path);
+    g_notificationsEnabled = IsTruthy(value, true);
 
     g_accentColor = GetSystemAccentColor();
 }
@@ -1424,6 +1434,20 @@ static void StepWindowOpacity(HWND foreground, int delta)
     ApplyWindowOpacity(entry, entry->opacityPercent + delta);
 }
 
+static void SetNotificationsEnabled(bool enabled)
+{
+    g_notificationsEnabled = enabled;
+
+    wchar_t path[MAX_PATH];
+    GetConfigPath(path, ARRAYSIZE(path));
+    WritePrivateProfileStringW(
+        CONFIG_SECTION, L"Notify", enabled ? L"1" : L"0", path);
+
+    if (enabled) {
+        ShowTrayMessage(APP_NAME, L"已开启通知。");
+    }
+}
+
 static void OpenConfigFile(void)
 {
     wchar_t path[MAX_PATH];
@@ -1609,6 +1633,8 @@ static void ExecuteMenuCommand(UINT command)
         OpenConfigFile();
     } else if (command == MENU_RELOAD) {
         ReloadConfiguration();
+    } else if (command == MENU_NOTIFY) {
+        SetNotificationsEnabled(!g_notificationsEnabled);
     } else if (command == MENU_ADMIN && !g_isElevated) {
         RelaunchElevated(NULL);
     } else if (command == MENU_EXIT) {
@@ -1649,6 +1675,11 @@ static void ShowTrayMenu(void)
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(menu, MF_STRING, MENU_RELOAD, L"重新加载配置");
     AppendMenuW(menu, MF_STRING, MENU_CONFIG, L"打开配置文件…");
+    AppendMenuW(
+        menu,
+        MF_STRING,
+        MENU_NOTIFY,
+        g_notificationsEnabled ? L"关闭通知" : L"开启通知");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
 
     UINT startupFlags = MF_STRING;
