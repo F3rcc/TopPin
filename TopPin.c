@@ -124,6 +124,7 @@ static bool g_borderClassRegistered;
 static bool g_borderTimerActive;
 static bool g_hotkeyFallback;
 static bool g_notificationsEnabled = true;
+static bool g_configRepaired;
 static bool g_opacityUpRegistered;
 static bool g_opacityDownRegistered;
 
@@ -687,6 +688,7 @@ static void WriteDefaultConfig(const wchar_t *path)
 {
     static const wchar_t content[] =
         L"; TopPin 配置。修改后从托盘菜单选「重新加载配置」生效。\r\n"
+        L"; 注意：本文件只认 ; 开头的注释，# 不是注释（写了 # 的键会被当成不存在）。\r\n"
         L";\r\n"
         L"; Hotkey = 修饰键 + 主键，至少要有一个修饰键\r\n"
         L";          修饰键：Ctrl / Alt / Shift / Win\r\n"
@@ -765,6 +767,19 @@ static void LoadHotkeySetting(
     }
 }
 
+/* 只补写"文件里确实没有"的键，已有值一概不动 */
+static bool RepairConfigKey(const wchar_t *path, const wchar_t *key, const wchar_t *defaultValue)
+{
+    wchar_t probe[128];
+    probe[0] = L'\0';
+    GetPrivateProfileStringW(CONFIG_SECTION, key, L"", probe, ARRAYSIZE(probe), path);
+    if (probe[0] != L'\0') {
+        return false;
+    }
+    WritePrivateProfileStringW(CONFIG_SECTION, key, defaultValue, path);
+    return true;
+}
+
 static void LoadConfig(void)
 {
     wchar_t path[MAX_PATH];
@@ -773,6 +788,23 @@ static void LoadConfig(void)
     if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) {
         WriteDefaultConfig(path);
     }
+
+    /*
+     * 文件存在但缺少 [TopPin] 段的键（常见原因：用 # 注释整段，而 ini 只认 ; 注释，
+     * 或手工编辑时删掉了段落名）时，以前会静默全部回退默认值，用户以为配置生效了。
+     * 这里把缺的键补回去，并在启动后提示一次。
+     */
+    bool repaired = RepairConfigKey(path, L"Hotkey", DEFAULT_HOTKEY_TEXT);
+    RepairConfigKey(path, L"OpacityUpHotkey", DEFAULT_OPACITY_UP_TEXT);
+    RepairConfigKey(path, L"OpacityDownHotkey", DEFAULT_OPACITY_DOWN_TEXT);
+    RepairConfigKey(path, L"Border", L"1");
+    RepairConfigKey(path, L"BorderColor", L"auto");
+    RepairConfigKey(path, L"BorderOpacity", L"100");
+    RepairConfigKey(path, L"BorderThickness", L"4");
+    RepairConfigKey(path, L"BorderCorner", L"1");
+    RepairConfigKey(path, L"BlockInGameMode", L"1");
+    RepairConfigKey(path, L"Notify", L"1");
+    g_configRepaired = repaired;
 
     wchar_t value[128];
 
@@ -1928,6 +1960,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR commandLine, i
         Sleep(100);
     }
     UpdateTrayTooltip();
+
+    if (g_configRepaired) {
+        ShowTrayMessage(
+            APP_NAME,
+            L"TopPin.ini 里没有可用的 [TopPin] 配置（可能被 # 注释掉了），已补回默认键，请重新编辑。");
+    }
 
     g_foregroundHook = SetWinEventHook(
         EVENT_SYSTEM_FOREGROUND,
