@@ -6,9 +6,18 @@
   <img src="Assets/TopPin-icon-preview.png" width="128" alt="TopPin icon">
 </p>
 
-<p align="center"><strong>A tiny 50 KB Windows utility that does one thing: keep a window always on top.</strong></p>
+<p align="center"><strong>A tiny (~65 KB) Windows utility that does one thing: keep a window always on top.</strong></p>
 
 TopPin is written in native Win32 C. It has no main window, installer, background service, or network access. Launch it into the system tray, press one shortcut to pin the active window, and press it again to unpin.
+
+> **This is a derivative work.** It is based on the original [chiimyen/TopPin](https://github.com/chiimyen/TopPin) and ports the frame
+> appearance, opacity control, game-mode check and move-tracking strategy from the
+> [Microsoft PowerToys](https://github.com/microsoft/PowerToys) `AlwaysOnTop` module.
+> See **[ATTRIBUTION.md](ATTRIBUTION.md)** for the file-by-file mapping and licenses.
+> Not affiliated with Microsoft or the PowerToys project.
+
+> Note: this fork is documented in Chinese — see **[README.md](README.md)** for the full feature list
+> (configurable hotkeys, PowerToys-style frame, opacity hotkeys, game-mode block, notification toggle).
 
 ## Download and use
 
