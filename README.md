@@ -91,6 +91,18 @@ BlockInGameMode=1
 4. 只遍历靠近四边的“边框带”，中间像素直接跳过，所以即使 4K 窗口渲染开销也可忽略。
 5. 边框窗口是 `WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW`，点击完全穿透、不进任务栏和 Alt-Tab。
 
+### 拖动跟随（和 PowerToys 同一套）
+
+边框跟随窗口位置用的是 **Windows 事件**，不是提高定时器频率：
+
+- 注册 `SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, ...)`（外加 `EVENT_SYSTEM_MOVESIZEEND`），拿到事件后先用 hwnd 过滤（只认 `OBJID_WINDOW` 且在置顶列表里的窗口）；
+- 命中就只做一次 `SetWindowPos(边框窗口, 新坐标, SWP_NOSIZE | SWP_NOREDRAW)`——**只挪，不重画**，单次开销微秒级；
+- 100 ms 定时器仍然保留，负责重新渲染内容和校正（尺寸变了也走这条完整路径）。
+
+所以拖动时边框跟着每一个位置事件走（接近屏幕刷新率），而重绘仍然只有 10 Hz，CPU 不会因为"更顺"而上涨。
+
+> 主题色只在启动和「重新加载配置」时读取一次并缓存，避免每个拖动事件都去读注册表；运行中改了系统主题色需要重新加载配置才会更新。
+
 ## 不透明度与游戏模式
 
 - 调节只作用在**已置顶**窗口上，内部用的是 `WS_EX_LAYERED` + `SetLayeredWindowAttributes`，并会缓存窗口原本的 layered/alpha/colorkey 状态，取消置顶或退出程序时原样还原。

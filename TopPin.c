@@ -22,6 +22,9 @@
 #ifndef DWMWA_WINDOW_CORNER_PREFERENCE
 #define DWMWA_WINDOW_CORNER_PREFERENCE 33
 #endif
+#ifndef OBJID_WINDOW
+#define OBJID_WINDOW ((LONG)0x00000000)
+#endif
 
 #define APP_NAME L"TopPin"
 #define WINDOW_CLASS L"TopPin.HiddenWindow"
@@ -100,6 +103,8 @@ static HWND g_window;
 static HWND g_lastTarget;
 static HANDLE g_mutex;
 static HWINEVENTHOOK g_foregroundHook;
+static HWINEVENTHOOK g_locationHook;
+static HWINEVENTHOOK g_moveSizeHook;
 static NOTIFYICONDATAW g_tray;
 static PinnedWindow g_pinned[MAX_PINNED];
 static UINT g_pinnedCount;
@@ -113,6 +118,7 @@ static bool g_blockInGameMode = true;
 static int g_borderThickness = DEFAULT_BORDER_THICKNESS;
 static int g_borderOpacity = DEFAULT_BORDER_OPACITY;
 static COLORREF g_borderColor = DEFAULT_BORDER_COLOR;
+static COLORREF g_accentColor = DEFAULT_BORDER_COLOR;
 static bool g_borderClassRegistered;
 static bool g_borderTimerActive;
 static bool g_hotkeyFallback;
@@ -120,6 +126,7 @@ static bool g_opacityUpRegistered;
 static bool g_opacityDownRegistered;
 
 static void RestoreWindowOpacity(PinnedWindow *entry);
+static COLORREF GetSystemAccentColor(void);
 static bool g_isElevated;
 static bool g_trayAdded;
 static bool g_hotkeyRegistered;
@@ -773,6 +780,8 @@ static void LoadConfig(void)
 
     GetPrivateProfileStringW(CONFIG_SECTION, L"BlockInGameMode", L"1", value, ARRAYSIZE(value), path);
     g_blockInGameMode = IsTruthy(value, true);
+
+    g_accentColor = GetSystemAccentColor();
 }
 
 static bool RegisterOneHotkey(int id, const HotkeyConfig *config)
@@ -1131,6 +1140,66 @@ static bool GetBorderFrame(HWND target, int thickness, RECT *frame)
     return true;
 }
 
+static int GetBorderThickness(HWND target)
+{
+    int thickness = (int)((float)g_borderThickness * GetDpiScale(target));
+    if (thickness < 1) {
+        thickness = 1;
+    }
+    if (thickness > BORDER_MAX_THICKNESS) {
+        thickness = BORDER_MAX_THICKNESS;
+    }
+    return thickness;
+}
+
+static void UpdatePinnedBorder(PinnedWindow *entry);
+
+/*
+ * 对齐 PowerToys WindowBorder::UpdateBorderPosition：
+ * 只把已经画好的边框窗口挪过去，不重画内容。
+ * 尺寸/粗细变化时才退回完整重绘路径。
+ */
+static void MovePinnedBorder(PinnedWindow *entry)
+{
+    if (!entry->border || !g_borderEnabled) {
+        return;
+    }
+
+    HWND target = entry->handle;
+    if (!IsWindow(target) || IsIconic(target) || !IsWindowVisible(target)) {
+        ShowWindow(entry->border, SW_HIDE);
+        entry->borderWidth = 0;
+        return;
+    }
+
+    int thickness = GetBorderThickness(target);
+    RECT frame;
+    if (!GetBorderFrame(target, thickness, &frame)) {
+        return;
+    }
+
+    bool resized = entry->borderWidth != thickness ||
+                   entry->renderedWidth != frame.right - frame.left ||
+                   entry->renderedHeight != frame.bottom - frame.top;
+    if (resized) {
+        UpdatePinnedBorder(entry);
+        return;
+    }
+
+    if (!IsWindowVisible(entry->border)) {
+        ShowWindow(entry->border, SW_SHOWNA);
+    }
+    SetWindowPos(
+        entry->border,
+        HWND_TOPMOST,
+        frame.left,
+        frame.top,
+        0,
+        0,
+        SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOREDRAW);
+    entry->borderRect = frame;
+}
+
 static void UpdatePinnedBorder(PinnedWindow *entry)
 {
     if (!entry->border || !g_borderEnabled) {
@@ -1145,12 +1214,9 @@ static void UpdatePinnedBorder(PinnedWindow *entry)
     }
 
     float scale = GetDpiScale(target);
-    int thickness = (int)((float)g_borderThickness * scale);
-    if (thickness < 1) {
-        thickness = 1;
-    }
+    int thickness = GetBorderThickness(target);
     float radius = g_borderRoundCorners ? GetWindowCornerRadius(target) * scale : 0.0f;
-    COLORREF color = g_borderAccent ? GetSystemAccentColor() : g_borderColor;
+    COLORREF color = g_borderAccent ? g_accentColor : g_borderColor;
 
     RECT frame;
     if (!GetBorderFrame(target, thickness, &frame)) {
@@ -1512,6 +1578,14 @@ static void CleanupApplication(void)
         UnhookWinEvent(g_foregroundHook);
         g_foregroundHook = NULL;
     }
+    if (g_locationHook) {
+        UnhookWinEvent(g_locationHook);
+        g_locationHook = NULL;
+    }
+    if (g_moveSizeHook) {
+        UnhookWinEvent(g_moveSizeHook);
+        g_moveSizeHook = NULL;
+    }
     if (g_trayAdded) {
         Shell_NotifyIconW(NIM_DELETE, &g_tray);
         g_trayAdded = false;
@@ -1625,6 +1699,31 @@ static void CALLBACK ForegroundChanged(
     (void)eventTime;
     if (IsEligibleWindow(window)) {
         g_lastTarget = window;
+    }
+}
+
+static void CALLBACK WindowLocationChanged(
+    HWINEVENTHOOK hook,
+    DWORD event,
+    HWND window,
+    LONG objectId,
+    LONG childId,
+    DWORD eventThread,
+    DWORD eventTime)
+{
+    (void)hook;
+    (void)event;
+    (void)childId;
+    (void)eventThread;
+    (void)eventTime;
+
+    if (!window || objectId != OBJID_WINDOW) {
+        return;
+    }
+
+    int index = FindPinnedWindow(window);
+    if (index >= 0) {
+        MovePinnedBorder(&g_pinned[index]);
     }
 }
 
@@ -1773,6 +1872,25 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR commandLine, i
         EVENT_SYSTEM_FOREGROUND,
         NULL,
         ForegroundChanged,
+        0,
+        0,
+        WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+
+    /* 拖动/缩放跟随：每个位置变化都只做一次 SetWindowPos，不重画 */
+    g_locationHook = SetWinEventHook(
+        EVENT_OBJECT_LOCATIONCHANGE,
+        EVENT_OBJECT_LOCATIONCHANGE,
+        NULL,
+        WindowLocationChanged,
+        0,
+        0,
+        WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+
+    g_moveSizeHook = SetWinEventHook(
+        EVENT_SYSTEM_MOVESIZEEND,
+        EVENT_SYSTEM_MOVESIZEEND,
+        NULL,
+        WindowLocationChanged,
         0,
         0,
         WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
