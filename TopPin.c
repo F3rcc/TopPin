@@ -349,6 +349,41 @@ static void ShowTrayMessage(const wchar_t *title, const wchar_t *message)
     }
 }
 
+/* 托盘提示文字：始终反映当前配置与实际注册状态 */
+static void BuildTrayTip(wchar_t *buffer, int length)
+{
+    if (g_isElevated) {
+        if (g_hotkeyRegistered) {
+            wsprintfW(buffer, L"TopPin · 管理员模式 · %s", g_hotkey.display);
+        } else {
+            wsprintfW(buffer, L"TopPin · 管理员模式 · 快捷键未生效");
+        }
+    } else {
+        if (g_hotkeyRegistered) {
+            wsprintfW(buffer, L"TopPin · %s 切换置顶", g_hotkey.display);
+        } else {
+            wsprintfW(buffer, L"TopPin · 快捷键未生效，请用托盘菜单");
+        }
+    }
+    if (length > 0) {
+        buffer[length - 1] = L'\0';
+    }
+}
+
+static void UpdateTrayTooltip(void)
+{
+    if (!g_trayAdded) {
+        return;
+    }
+
+    BuildTrayTip(g_tray.szTip, ARRAYSIZE(g_tray.szTip));
+
+    UINT savedFlags = g_tray.uFlags;
+    g_tray.uFlags = NIF_TIP;
+    Shell_NotifyIconW(NIM_MODIFY, &g_tray);
+    g_tray.uFlags = savedFlags;
+}
+
 static bool RelaunchElevated(HWND target)
 {
     wchar_t executable[MAX_PATH];
@@ -1460,6 +1495,7 @@ static void ReloadConfiguration(void)
     LoadConfig();
     bool hotkeyReady = TryRegisterHotkey();
     ApplyBorderSettings();
+    UpdateTrayTooltip();
 
     wchar_t message[256];
     if (g_hotkeyFallback) {
@@ -1874,13 +1910,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR commandLine, i
     g_tray.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     g_tray.uCallbackMessage = WM_TRAY;
     g_tray.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(ICON_APP));
-    wchar_t tip[128];
-    if (g_isElevated) {
-        wsprintfW(tip, L"TopPin · 管理员模式 · %s", g_hotkey.display);
-    } else {
-        wsprintfW(tip, L"TopPin · %s 切换置顶", g_hotkey.display);
-    }
-    lstrcpynW(g_tray.szTip, tip, ARRAYSIZE(g_tray.szTip));
+    BuildTrayTip(g_tray.szTip, ARRAYSIZE(g_tray.szTip));
     if (!Shell_NotifyIconW(NIM_ADD, &g_tray)) {
         DestroyWindow(g_window);
         CloseHandle(g_mutex);
@@ -1897,6 +1927,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR commandLine, i
         }
         Sleep(100);
     }
+    UpdateTrayTooltip();
 
     g_foregroundHook = SetWinEventHook(
         EVENT_SYSTEM_FOREGROUND,
