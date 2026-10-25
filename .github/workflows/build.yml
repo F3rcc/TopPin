@@ -1,0 +1,68 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: MinGW UCRT64
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSYS2 (UCRT64 + gcc)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: mingw-w64-ucrt-x86_64-gcc
+
+      - name: Show toolchain
+        shell: msys2 {0}
+        run: gcc --version | head -n 1 && windres --version | head -n 1
+
+      - name: Build TopPin.exe
+        shell: msys2 {0}
+        run: |
+          set -e
+          mkdir -p build dist
+          windres --codepage=65001 TopPin.rc -O coff -o build/TopPin.res.o
+          gcc TopPin.c build/TopPin.res.o -o dist/TopPin.exe \
+            -std=c17 -Os -s -municode -mwindows \
+            -Wall -Wextra -Wpedantic \
+            -ffunction-sections -fdata-sections \
+            -fno-asynchronous-unwind-tables -fno-unwind-tables \
+            -Wl,--gc-sections,--dynamicbase,--nxcompat,--high-entropy-va \
+            -luser32 -lshell32
+          echo "--- built ---"
+          ls -l dist/TopPin.exe
+          sha256sum dist/TopPin.exe | tee dist/SHA256SUMS.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TopPin-exe
+          path: |
+            dist/TopPin.exe
+            dist/SHA256SUMS.txt
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          gh release view $tag 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --title $tag --generate-notes
+          }
+          gh release upload $tag dist/TopPin.exe dist/SHA256SUMS.txt --clobber
